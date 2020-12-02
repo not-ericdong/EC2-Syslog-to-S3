@@ -1,0 +1,79 @@
+Description: 'The AWS CloudFormation template creates a KMS encryption key and a encrypted S3 bucket using the encryption key'
+Parameters: 
+  S3BucketName: 
+    Type: String
+    Default: fluentd-ericd-2
+    Description: Enter the name of the S3 bucket.
+Resources:
+  s3KMSKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: KMS key for S3
+      Enabled: true
+      KeyPolicy:
+        Id: key-s3
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow VPC Flow Logs to use the key as well
+            Effect: Allow
+            Principal:
+              Service:
+                - delivery.logs.amazonaws.com
+            Action: 'kms:GenerateDataKey*'
+            Resource: '*'
+    
+  s3KeyAlias:
+      Type: AWS::KMS::Alias
+      Properties:
+        AliasName: alias/s301
+        TargetKeyId:
+          Ref: s3KMSKey
+
+  S3GeneralBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${s3KeyAlias}'
+              SSEAlgorithm: 'aws:kms'
+      BucketName: !Ref S3BucketName
+  
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: S3InstanceProfile
+      Roles:
+        - !Ref InstanceProfileAssumeRole
+
+  InstanceProfileAssumeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: S3SecurityDataAssumeRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AssumeRoleS3
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "s3:*"
+                  - "kms:*"
+                Resource: "*"
+

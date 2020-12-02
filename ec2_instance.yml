@@ -1,0 +1,114 @@
+Description: Install td-agent (from fluentd) onto an EC2 instance using a CloudFormation StackSet
+Parameters: 
+  VPCID: 
+    Type: AWS::EC2::VPC::Id
+    Description: Enter the VPC ID.
+  SubnetID:
+    Type: AWS::EC2::Subnet::Id
+    Description: Enter the Subnet ID.
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: fluentd
+    Description: Name of EC2 Key Pair for SSH Access, must be created prior to running this.
+  S3BucketName:
+    Type: String
+    Default: fluentd-ericd-2
+    Description: Name of the S3 Bucket to be logged to.
+Mappings:
+  AmiMap:
+    us-east-1:
+      id: "ami-04d29b6f966df1537"
+    us-east-2:
+      id: "ami-09558250a3419e7d0"
+    us-west-1:
+      id: "ami-08d9a394ac1c2994c"
+    us-west-2:
+      id: "ami-0e472933a1395e172"
+  # KeyPair:
+  #   Key01:
+  #     key: "fluentd"
+  # SubnetID:
+  #   Subnet01:
+  #     id: "subnet-4a5f0f30"
+  # VPCID:
+  #   VPC01:
+  #     id: "vpc-f85dae93"
+Resources:
+  FluentdSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: sgFluentd
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+        Description: SSH Access
+      GroupDescription: Security Group for demo server
+      VpcId: !Ref VPCID
+  FluentdEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AmiMap
+        - !Ref AWS::Region
+        - id
+      InstanceType: "t3.micro"
+      IamInstanceProfile: "S3InstanceProfile"
+      KeyName: !Ref KeyPair
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/bash
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          echo "Hello from user-data!"
+
+          # Apply the appropriate OS patches
+          yum -y upgrade
+          yum -y update
+          # this is to ensure that the directory path is the instance ID
+          instance_id=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+
+          # td-agent 4
+          curl -L https://toolbelt.treasuredata.com/sh/install-amazon2-td-agent4.sh | sh
+
+          # changing the config file for td-agent
+          echo '' > /etc/td-agent/td-agent.conf
+          cat << EOF > /etc/td-agent/td-agent.conf
+
+          # td-agent.conf contents
+          <source>
+            @type syslog
+            port 5140
+            bind 0.0.0.0
+            tag test
+          </source>
+          <match test.*.*>
+            @type s3
+            path $instance_id/
+            <instance_profile_credentials>
+              ip_address 169.254.169.254
+              port 80
+            </instance_profile_credentials>
+            s3_bucket ${S3BucketName}
+            s3_region us-east-2
+            auto_create_bucket true
+            <buffer>
+              flush_mode interval
+              flush_interval 300s
+              path /var/log/td-agent/buffer
+            </buffer>
+          </match>
+          EOF
+
+          # start logging and write to S3 
+          systemctl start td-agent.service  
+          echo '*.* @127.0.0.1:5140' >> /etc/rsyslog.conf
+          systemctl restart rsyslog  
+
+      NetworkInterfaces:
+      - Description: Primary network interface
+        DeviceIndex: "0"
+        SubnetId: !Ref SubnetID
+        GroupSet:
+        - Ref: FluentdSecurityGroup
